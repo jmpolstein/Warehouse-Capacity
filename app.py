@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
+from math import floor, ceil
 
-# Define classes for data modeling
+# Define classes
 class PositionType:
     def __init__(self, aisle, level, max_height, width_capacity, weight_capacity):
         self.aisle = aisle
@@ -10,128 +10,87 @@ class PositionType:
         self.max_height = max_height
         self.width_capacity = width_capacity
         self.weight_capacity = weight_capacity
-    
-    def to_dict(self):
-        return {
-            'aisle': self.aisle,
-            'level': self.level,
-            'max_height': self.max_height,
-            'width_capacity': self.width_capacity,
-            'weight_capacity': self.weight_capacity
-        }
-    
-    @classmethod
-    def from_dict(cls, data):
-        return cls(
-            aisle=data['aisle'],
-            level=data['level'],
-            max_height=data['max_height'],
-            width_capacity=data['width_capacity'],
-            weight_capacity=data['weight_capacity']
-        )
 
-class Item:
+class Box:
+    def __init__(self, sku, length, width, height, weight, total_boxes):
+        self.sku = sku
+        self.length = length
+        self.width = width
+        self.height = height
+        self.weight = weight
+        self.total_boxes = total_boxes
+
+class Pallet:
     def __init__(self, sku, length, width, height, weight):
         self.sku = sku
         self.length = length
         self.width = width
         self.height = height
         self.weight = weight
-    
-    def to_dict(self):
-        return {
-            'sku': self.sku,
-            'length': self.length,
-            'width': self.width,
-            'height': self.height,
-            'weight': self.weight
-        }
-    
-    @classmethod
-    def from_dict(cls, data):
-        return cls(
-            sku=data['sku'],
-            length=data['length'],
-            width=data['width'],
-            height=data['height'],
-            weight=data['weight']
-        )
-    
-    def fits_in_position(self, position, fixed_length, clearance=0.0):
-        """Check if this item fits in the given position type with clearance."""
-        return (self.length <= fixed_length and
-                self.width <= position.width_capacity and
-                self.height <= position.max_height - clearance and
-                self.weight <= position.weight_capacity)
 
-# Core assignment function with improvements
-def assign_pallets(fixed_length, position_types, items, clearance=4.0):
+# Function to configure pallets for a SKU
+def configure_pallets(box, pallet_length, pallet_width, position_types, clearance):
     """
-    Assign items to appropriate pallet positions.
+    Configures pallets for a given SKU by optimizing box placement to maximize space.
     
-    Parameters:
-    - fixed_length (float): The fixed length for all pallet positions.
-    - position_types (list): List of PositionType objects.
-    - items (list): List of Item objects.
-    - clearance (float): Required height clearance in inches (default: 4.0).
+    Args:
+        box: Box object with dimensions and total_boxes
+        pallet_length: Fixed length of the pallet base
+        pallet_width: Fixed width of the pallet base
+        position_types: List of PositionType objects
+        clearance: Height clearance required (e.g., 4 inches)
     
     Returns:
-    - assignments (dict): Counts of items assigned to each position type.
-    - unassigned_items (list): SKUs of items that couldn’t be assigned.
-    - item_assignments (list): List of dicts with item SKU and assigned position.
+        List of Pallet objects, or None if boxes cannot be placed
     """
-    # Input validation
-    if fixed_length <= 0:
-        raise ValueError("Fixed length must be positive.")
-    if clearance < 0:
-        raise ValueError("Clearance cannot be negative.")
-    for pos in position_types:
-        if pos.max_height <= 0 or pos.width_capacity <= 0 or pos.weight_capacity <= 0:
-            raise ValueError("Position capacities must be positive.")
-    for item in items:
-        if item.length <= 0 or item.width <= 0 or item.height <= 0 or item.weight <= 0:
-            raise ValueError("Item dimensions and weight must be positive.")
+    # Step 1: Calculate maximum boxes per layer by trying both orientations
+    orientation1 = floor(pallet_length / box.length) * floor(pallet_width / box.width)
+    orientation2 = floor(pallet_length / box.width) * floor(pallet_width / box.length)
+    boxes_per_layer = max(orientation1, orientation2)
+    if boxes_per_layer == 0:
+        return None  # Boxes are too large to fit on the pallet
     
-    # Initialize tracking structures
-    assignments = {}  # Format: 'Aisle A Level 1': count
-    unassigned_items = []
-    item_assignments = []
+    # Step 2: Determine maximum layers that fit in at least one position type
+    max_layers = 0
+    for position in position_types:
+        # Check if a single box height fits
+        if box.height > position.max_height - clearance:
+            continue
+        layers_height = floor((position.max_height - clearance) / box.height)
+        if layers_height <= 0:
+            continue
+        weight_per_layer = boxes_per_layer * box.weight
+        if weight_per_layer > position.weight_capacity:
+            continue
+        layers_weight = floor(position.weight_capacity / weight_per_layer)
+        possible_layers = min(layers_height, layers_weight)
+        max_layers = max(max_layers, possible_layers)
     
-    # Sort position types by max_height (ascending) to optimize assignments
-    sorted_positions = sorted(position_types, key=lambda p: p.max_height)
+    if max_layers == 0:
+        return None  # Cannot stack even one layer due to height or weight constraints
     
-    # Process each item
-    for item in items:
-        assigned = False
-        for position in sorted_positions:
-            position_key = f"Aisle {position.aisle} Level {position.level}"
-            # Use fits_in_position method with clearance
-            if item.fits_in_position(position, fixed_length, clearance):
-                # Update assignments count
-                assignments[position_key] = assignments.get(position_key, 0) + 1
-                # Record individual assignment
-                item_assignments.append({
-                    'sku': item.sku,
-                    'assigned_to': position_key
-                })
-                assigned = True
-                break
-        
-        if not assigned:
-            unassigned_items.append(item.sku)
+    # Step 3: Calculate pallet dimensions
+    boxes_per_pallet = boxes_per_layer * max_layers
+    pallet_height = max_layers * box.height
+    pallet_weight = boxes_per_layer * max_layers * box.weight
     
-    return assignments, unassigned_items, item_assignments
+    # Step 4: Calculate number of pallets needed
+    total_pallets = ceil(box.total_boxes / boxes_per_pallet)
+    
+    # Step 5: Create pallets
+    pallets = [Pallet(box.sku, pallet_length, pallet_width, pallet_height, pallet_weight) 
+               for _ in range(total_pallets)]
+    return pallets
 
-# Streamlit app setup
-st.set_page_config(page_title="Warehouse Pallet Position Calculator", layout="wide")
+# Streamlit app
+st.title("Warehouse Pallet Position Calculator")
 
-# Example UI (since original UI was incomplete)
-st.title("Pallet Position Assignment Tool")
+# Input pallet base dimensions
+st.subheader("Pallet Base Dimensions")
+pallet_length = st.number_input("Pallet Length (inches)", min_value=0.0, value=48.0)
+pallet_width = st.number_input("Pallet Width (inches)", min_value=0.0, value=40.0)
 
-# Input for fixed length
-fixed_length = st.number_input("Fixed Length (inches)", min_value=0.1, value=48.0)
-
-# Placeholder for position types input
+# Input position types
 st.subheader("Position Types")
 position_data = st.data_editor(
     pd.DataFrame({
@@ -141,48 +100,87 @@ position_data = st.data_editor(
         'Width Capacity': [40.0, 40.0],
         'Weight Capacity': [2000.0, 2500.0]
     }),
-    num_rows="dynamic"
+    num_rows="dynamic",
+    key="position_data"
 )
 
-# Placeholder for items input
-st.subheader("Items")
-item_data = st.data_editor(
+# Input box details per SKU
+st.subheader("Boxes per SKU")
+box_data = st.data_editor(
     pd.DataFrame({
         'SKU': ['SKU001', 'SKU002'],
-        'Length': [48.0, 48.0],
-        'Width': [36.0, 38.0],
-        'Height': [45.0, 55.0],
-        'Weight': [1500.0, 1800.0]
+        'Box Length': [12.0, 15.0],
+        'Box Width': [10.0, 12.0],
+        'Box Height': [10.0, 15.0],
+        'Box Weight': [50.0, 60.0],
+        'Total Boxes': [100, 50]
     }),
-    num_rows="dynamic"
+    num_rows="dynamic",
+    key="box_data"
 )
 
-if st.button("Assign Pallets"):
-    # Convert input data to objects
+if st.button("Calculate"):
+    # Create position types
     position_types = [
         PositionType(row['Aisle'], row['Level'], row['Max Height'], 
                     row['Width Capacity'], row['Weight Capacity'])
         for _, row in position_data.iterrows()
     ]
-    items = [
-        Item(row['SKU'], row['Length'], row['Width'], row['Height'], row['Weight'])
-        for _, row in item_data.iterrows()
+    
+    # Create boxes
+    boxes = [
+        Box(row['SKU'], row['Box Length'], row['Box Width'], 
+            row['Box Height'], row['Box Weight'], row['Total Boxes'])
+        for _, row in box_data.iterrows()
     ]
     
-    # Run assignment
-    try:
-        assignments, unassigned_items, item_assignments = assign_pallets(
-            fixed_length, position_types, items
-        )
-        
-        # Display results
-        st.subheader("Assignments")
-        st.write(assignments)
-        
-        st.subheader("Unassigned Items")
-        st.write(unassigned_items)
-        
-        st.subheader("Detailed Item Assignments")
-        st.dataframe(item_assignments)
-    except ValueError as e:
-        st.error(f"Error: {e}")
+    # Configure pallets for each SKU
+    all_pallets = []
+    unassignable_skus = []
+    clearance = 4.0  # Fixed clearance value
+    for box in boxes:
+        pallets = configure_pallets(box, pallet_length, pallet_width, position_types, clearance)
+        if pallets is None:
+            unassignable_skus.append(box.sku)
+        else:
+            all_pallets.extend(pallets)
+    
+    # Assign pallets to positions
+    assignments = {}
+    unassigned_pallets = []
+    for pallet in all_pallets:
+        assigned = False
+        # Sort positions by max_height to assign to smallest suitable position
+        for position in sorted(position_types, key=lambda p: p.max_height):
+            if (pallet.height <= position.max_height - clearance and 
+                pallet.weight <= position.weight_capacity and 
+                pallet.width <= position.width_capacity):
+                position_key = f"Aisle {position.aisle} Level {position.level}"
+                assignments[position_key] = assignments.get(position_key, 0) + 1
+                assigned = True
+                break
+        if not assigned:
+            unassigned_pallets.append(pallet.sku)
+    
+    # Display results
+    st.subheader("Pallet Assignments")
+    if assignments:
+        st.write("Number of pallets assigned to each position:")
+        for position, count in assignments.items():
+            st.write(f"{position}: {count} pallet(s)")
+    else:
+        st.write("No pallets assigned.")
+    
+    st.subheader("Unassignable SKUs")
+    if unassignable_skus:
+        st.write("The following SKUs could not be placed on pallets due to size or weight constraints:")
+        st.write(", ".join(unassignable_skus))
+    else:
+        st.write("All SKUs were successfully placed on pallets.")
+    
+    st.subheader("Unassigned Pallets")
+    if unassigned_pallets:
+        st.write("The following pallets could not be assigned to any position:")
+        st.write(", ".join(set(unassigned_pallets)))
+    else:
+        st.write("All pallets were successfully assigned.")
