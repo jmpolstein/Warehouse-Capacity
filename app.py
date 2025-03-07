@@ -21,12 +21,13 @@ class Box:
         self.total_boxes = total_boxes
 
 class Pallet:
-    def __init__(self, sku, length, width, height, weight):
+    def __init__(self, sku, length, width, height, weight, boxes):
         self.sku = sku
         self.length = length
         self.width = width
         self.height = height
         self.weight = weight
+        self.boxes = boxes  # Number of boxes on this pallet
 
 # Function to configure pallets for a SKU
 def configure_pallets(box, pallet_length, pallet_width, position_types, clearance):
@@ -43,17 +44,16 @@ def configure_pallets(box, pallet_length, pallet_width, position_types, clearanc
     Returns:
         List of Pallet objects, or None if boxes cannot be placed
     """
-    # Step 1: Calculate maximum boxes per layer by trying both orientations
+    # Calculate maximum boxes per layer by trying both orientations
     orientation1 = floor(pallet_length / box.length) * floor(pallet_width / box.width)
     orientation2 = floor(pallet_length / box.width) * floor(pallet_width / box.length)
     boxes_per_layer = max(orientation1, orientation2)
     if boxes_per_layer == 0:
         return None  # Boxes are too large to fit on the pallet
     
-    # Step 2: Determine maximum layers that fit in at least one position type
+    # Determine maximum layers that fit in at least one position type
     max_layers = 0
     for position in position_types:
-        # Check if a single box height fits
         if box.height > position.max_height - clearance:
             continue
         layers_height = floor((position.max_height - clearance) / box.height)
@@ -69,18 +69,58 @@ def configure_pallets(box, pallet_length, pallet_width, position_types, clearanc
     if max_layers == 0:
         return None  # Cannot stack even one layer due to height or weight constraints
     
-    # Step 3: Calculate pallet dimensions
+    # Calculate pallet dimensions and boxes per pallet
     boxes_per_pallet = boxes_per_layer * max_layers
     pallet_height = max_layers * box.height
-    pallet_weight = boxes_per_layer * max_layers * box.weight
+    pallet_weight = boxes_per_pallet * box.weight
     
-    # Step 4: Calculate number of pallets needed
-    total_pallets = ceil(box.total_boxes / boxes_per_pallet)
+    # Create pallets, distributing boxes
+    pallets = []
+    remaining_boxes = box.total_boxes
+    while remaining_boxes > 0:
+        boxes_on_pallet = min(boxes_per_pallet, remaining_boxes)
+        # Adjust height if fewer boxes are placed (e.g., partial layers)
+        layers_on_pallet = ceil(boxes_on_pallet / boxes_per_layer)
+        pallet_height_actual = layers_on_pallet * box.height
+        pallet_weight_actual = boxes_on_pallet * box.weight
+        pallets.append(Pallet(box.sku, pallet_length, pallet_width, pallet_height_actual, pallet_weight_actual, boxes_on_pallet))
+        remaining_boxes -= boxes_on_pallet
     
-    # Step 5: Create pallets
-    pallets = [Pallet(box.sku, pallet_length, pallet_width, pallet_height, pallet_weight) 
-               for _ in range(total_pallets)]
     return pallets
+
+# Function to assign pallets to positions
+def assign_pallets(pallets, position_types, clearance):
+    """
+    Assigns pallets to warehouse positions.
+    
+    Args:
+        pallets: List of Pallet objects
+        position_types: List of PositionType objects
+        clearance: Height clearance required
+    
+    Returns:
+        assignments: List of dicts with position, sku, and boxes
+        unassigned_pallets: List of unassigned pallet SKUs
+    """
+    assignments = []
+    unassigned_pallets = []
+    for pallet in pallets:
+        assigned = False
+        for position in sorted(position_types, key=lambda p: p.max_height):
+            if (pallet.height <= position.max_height - clearance and 
+                pallet.weight <= position.weight_capacity and 
+                pallet.width <= position.width_capacity):
+                position_key = f"Aisle {position.aisle} Level {position.level}"
+                assignments.append({
+                    'position': position_key,
+                    'sku': pallet.sku,
+                    'boxes': pallet.boxes
+                })
+                assigned = True
+                break
+        if not assigned:
+            unassigned_pallets.append(pallet.sku)
+    return assignments, unassigned_pallets
 
 # Streamlit app
 st.title("Warehouse Pallet Position Calculator")
@@ -146,28 +186,14 @@ if st.button("Calculate"):
             all_pallets.extend(pallets)
     
     # Assign pallets to positions
-    assignments = {}
-    unassigned_pallets = []
-    for pallet in all_pallets:
-        assigned = False
-        # Sort positions by max_height to assign to smallest suitable position
-        for position in sorted(position_types, key=lambda p: p.max_height):
-            if (pallet.height <= position.max_height - clearance and 
-                pallet.weight <= position.weight_capacity and 
-                pallet.width <= position.width_capacity):
-                position_key = f"Aisle {position.aisle} Level {position.level}"
-                assignments[position_key] = assignments.get(position_key, 0) + 1
-                assigned = True
-                break
-        if not assigned:
-            unassigned_pallets.append(pallet.sku)
+    assignments, unassigned_pallets = assign_pallets(all_pallets, position_types, clearance)
     
     # Display results
     st.subheader("Pallet Assignments")
     if assignments:
-        st.write("Number of pallets assigned to each position:")
-        for position, count in assignments.items():
-            st.write(f"{position}: {count} pallet(s)")
+        assignments_df = pd.DataFrame(assignments)
+        st.write("Detailed assignments of pallets to positions:")
+        st.dataframe(assignments_df)
     else:
         st.write("No pallets assigned.")
     
@@ -176,11 +202,4 @@ if st.button("Calculate"):
         st.write("The following SKUs could not be placed on pallets due to size or weight constraints:")
         st.write(", ".join(unassignable_skus))
     else:
-        st.write("All SKUs were successfully placed on pallets.")
-    
-    st.subheader("Unassigned Pallets")
-    if unassigned_pallets:
-        st.write("The following pallets could not be assigned to any position:")
-        st.write(", ".join(set(unassigned_pallets)))
-    else:
-        st.write("All pallets were successfully assigned.")
+        st.write("All SKUs were successfully placed on
